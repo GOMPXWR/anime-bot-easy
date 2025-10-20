@@ -30,8 +30,16 @@ const CONFIG = {
             "When Will Her Tears Dry"
         ]
     },
-    ultimasNoticias: new Set()
+    ultimasNoticias: new Set(),
+    usuariosNotificados: new Set()
 };
+
+function esImagenValida(url) {
+    if (!url) return false;
+    return url.match(/\.(jpeg|jpg|gif|png|webp)$/) !== null || 
+           url.includes('i.redd.it') ||
+           url.includes('preview.redd.it');
+}
 
 client.once('ready', () => {
     console.log(`✅ Bot conectado como ${client.user.tag}`);
@@ -57,6 +65,7 @@ async function verificarNoticias() {
 
         const anuncios = await buscarAnunciosAniList();
         const noticiasReddit = await buscarNoticiasReddit();
+        const noticiasDoblaje = await buscarNoticiasDoblaje();
 
         for (const anuncio of anuncios) {
             const idNoticia = `anuncio_${anuncio.titulo}`;
@@ -71,8 +80,18 @@ async function verificarNoticias() {
                         { name: 'Fecha Est.', value: anuncio.fecha, inline: true }
                     );
 
-                const mensaje = CONFIG.rolMencion ? `<@&${CONFIG.rolMencion}> ¡Nuevo anime!` : '¡Nuevo anime anunciado!';
-                await channel.send({ content: mensaje, embeds: [embed] });
+                if (anuncio.imagen && esImagenValida(anuncio.imagen)) {
+                    embed.setImage(anuncio.imagen);
+                    embed.setThumbnail(anuncio.imagen);
+                }
+
+                const menciones = Array.from(CONFIG.usuariosNotificados).map(id => `<@${id}>`).join(' ');
+                const mensaje = menciones || '¡Nuevo anime anunciado!';
+                
+                await channel.send({ 
+                    content: mensaje,
+                    embeds: [embed] 
+                });
                 CONFIG.ultimasNoticias.add(idNoticia);
                 console.log(`📢 Nuevo anuncio: ${anuncio.titulo}`);
             }
@@ -90,9 +109,36 @@ async function verificarNoticias() {
                         { name: 'Fuente', value: `r/${noticia.subreddit}`, inline: true }
                     );
 
+                if (noticia.imagen && esImagenValida(noticia.imagen)) {
+                    embed.setImage(noticia.imagen);
+                }
+
                 await channel.send({ embeds: [embed] });
                 CONFIG.ultimasNoticias.add(idNoticia);
                 console.log(`📰 Nueva noticia: ${noticia.titulo}`);
+            }
+        }
+
+        for (const noticia of noticiasDoblaje) {
+            const idNoticia = `doblaje_${noticia.created}`;
+            if (!CONFIG.ultimasNoticias.has(idNoticia)) {
+                const embed = new EmbedBuilder()
+                    .setTitle('🎙️ ¡Noticia de Doblaje!')
+                    .setDescription(`**${noticia.titulo}**`)
+                    .setColor(0x9B59B6)
+                    .setURL(noticia.url)
+                    .addFields(
+                        { name: 'Fuente', value: `r/${noticia.subreddit}`, inline: true },
+                        { name: 'Tipo', value: 'Doblaje/Localización', inline: true }
+                    );
+
+                if (noticia.imagen && esImagenValida(noticia.imagen)) {
+                    embed.setThumbnail(noticia.imagen);
+                }
+
+                await channel.send({ embeds: [embed] });
+                CONFIG.ultimasNoticias.add(idNoticia);
+                console.log(`🎙️ Nueva noticia de doblaje: ${noticia.titulo}`);
             }
         }
 
@@ -115,6 +161,7 @@ async function buscarAnunciosAniList() {
                         startDate { year month day }
                         siteUrl
                         format
+                        coverImage { large medium }
                     }
                 }
             }
@@ -130,7 +177,8 @@ async function buscarAnunciosAniList() {
                     titulo: titulo,
                     fecha: `${media.startDate.year}-${media.startDate.month}-${media.startDate.day}`,
                     url: media.siteUrl,
-                    formato: media.format
+                    formato: media.format,
+                    imagen: media.coverImage?.large || media.coverImage?.medium
                 });
             }
         }
@@ -143,22 +191,29 @@ async function buscarAnunciosAniList() {
 
 async function buscarNoticiasReddit() {
     try {
-        const response = await axios.get('https://www.reddit.com/r/anime/new/.json?limit=10');
+        const response = await axios.get('https://www.reddit.com/r/anime/new/.json?limit=15');
         const noticias = [];
 
         for (const post of response.data.data.children) {
             const titulo = post.data.title.toLowerCase();
             const keywords = [
                 'season 2', 'season 3', 'sequel', 'announced', 'confirmed',
-                'leak', 'rumor', 'adaptation', 'trailer'
+                'leak', 'rumor', 'adaptation', 'trailer', 'release date',
+                'anime awards', 'cancel', 'renewed', 'delay'
+            ];
+            const seriesEspecificas = [
+                'roshidere', '100 girlfriends', 'dandadan',
+                'spy x family', 'one piece', 'when will her tears dry'
             ];
 
-            if (keywords.some(keyword => titulo.includes(keyword))) {
+            if (keywords.some(keyword => titulo.includes(keyword)) ||
+                seriesEspecificas.some(serie => titulo.includes(serie))) {
                 noticias.push({
                     titulo: post.data.title,
                     url: `https://reddit.com${post.data.permalink}`,
                     subreddit: post.data.subreddit,
-                    created: post.data.created_utc
+                    created: post.data.created_utc,
+                    imagen: post.data.url_overridden_by_dest || post.data.thumbnail
                 });
             }
         }
@@ -169,30 +224,148 @@ async function buscarNoticiasReddit() {
     }
 }
 
-async function buscarInfoAniList(nombreSerie, tipo) {
+async function buscarNoticiasDoblaje() {
+    try {
+        const subreddits = ['r/animedubs', 'r/anime', 'r/spanishdubs'];
+        const noticiasDoblaje = [];
+        
+        for (const subreddit of subreddits) {
+            try {
+                const response = await axios.get(`https://www.reddit.com/${subreddit}/new/.json?limit=8`);
+                
+                for (const post of response.data.data.children) {
+                    const titulo = post.data.title.toLowerCase();
+                    const keywordsDoblaje = [
+                        'dub', 'dubbed', 'doblaje', 'doblado', 'latino', 'español',
+                        'castellano', 'voice cast', 'seiyuu', 'english dub',
+                        'doblaje mexicano', 'doblaje latino', 'latam dub'
+                    ];
+                    
+                    if (keywordsDoblaje.some(keyword => titulo.includes(keyword))) {
+                        noticiasDoblaje.push({
+                            titulo: post.data.title,
+                            url: `https://reddit.com${post.data.permalink}`,
+                            subreddit: post.data.subreddit,
+                            created: post.data.created_utc,
+                            imagen: post.data.url_overridden_by_dest || post.data.thumbnail
+                        });
+                    }
+                }
+            } catch (error) {
+                console.error(`Error en subreddit ${subreddit}:`, error.message);
+            }
+        }
+        return noticiasDoblaje;
+    } catch (error) {
+        console.error('Error buscando noticias de doblaje:', error.message);
+        return [];
+    }
+}
+
+async function buscarInfoAniList(nombreSerie, tipo = null) {
     try {
         const query = `
             query ($search: String, $type: MediaType) {
                 Media(search: $search, type: $type) {
-                    title { romaji english }
+                    id
+                    title {
+                        romaji
+                        english
+                        native
+                    }
+                    type
+                    format
                     status
+                    description
+                    startDate {
+                        year
+                        month
+                        day
+                    }
+                    endDate {
+                        year
+                        month
+                        day
+                    }
+                    season
                     episodes
                     chapters
-                    format
+                    volumes
+                    duration
+                    source
+                    genres
+                    averageScore
+                    popularity
+                    trending
+                    favourites
+                    isAdult
                     siteUrl
-                    description
-                    startDate { year month day }
+                    coverImage {
+                        extraLarge
+                        large
+                        medium
+                        color
+                    }
+                    bannerImage
+                    relations {
+                        edges {
+                            node {
+                                title {
+                                    romaji
+                                    english
+                                }
+                                type
+                                format
+                                status
+                            }
+                            relationType
+                        }
+                    }
+                    nextAiringEpisode {
+                        episode
+                        airingAt
+                    }
+                    studios {
+                        edges {
+                            node {
+                                name
+                            }
+                            isMain
+                        }
+                    }
                 }
             }
         `;
 
-        const variables = { search: nombreSerie, type: tipo };
-        const response = await axios.post('https://graphql.anilist.co', {
-            query,
-            variables
-        });
+        let media = null;
+        
+        if (!tipo) {
+            const variablesAnime = { search: nombreSerie, type: 'ANIME' };
+            const responseAnime = await axios.post('https://graphql.anilist.co', {
+                query,
+                variables: variablesAnime
+            });
+            
+            if (responseAnime.data.data.Media) {
+                media = responseAnime.data.data.Media;
+            } else {
+                const variablesManga = { search: nombreSerie, type: 'MANGA' };
+                const responseManga = await axios.post('https://graphql.anilist.co', {
+                    query,
+                    variables: variablesManga
+                });
+                media = responseManga.data.data.Media;
+            }
+        } else {
+            const variables = { search: nombreSerie, type: tipo };
+            const response = await axios.post('https://graphql.anilist.co', {
+                query,
+                variables
+            });
+            media = response.data.data.Media;
+        }
 
-        return response.data;
+        return { data: { Media: media } };
     } catch (error) {
         console.error('Error buscando info:', error.message);
         return null;
@@ -230,6 +403,7 @@ client.on('messageCreate', async (message) => {
             .addFields(
                 { name: 'Canal', value: CONFIG.canalNoticias ? `<#${CONFIG.canalNoticias}>` : 'No config', inline: true },
                 { name: 'Noticias', value: CONFIG.ultimasNoticias.size.toString(), inline: true },
+                { name: 'Usuarios Notif.', value: CONFIG.usuariosNotificados.size.toString(), inline: true },
                 { name: 'Ping', value: `${client.ws.ping}ms`, inline: true }
             );
 
@@ -293,33 +467,142 @@ client.on('messageCreate', async (message) => {
     }
 
     if (message.content.startsWith('!info')) {
-        const nombreSerie = message.content.slice(6).trim();
-        if (!nombreSerie) {
-            return message.reply('❌ Uso: `!info Nombre de la serie`');
+        const args = message.content.slice(6).trim();
+        if (!args) {
+            return message.reply('❌ Uso: `!info Nombre de la serie` o `!info anime/manga Nombre`');
+        }
+
+        let tipo = null;
+        let nombreSerie = args;
+        
+        if (args.toLowerCase().startsWith('anime ')) {
+            tipo = 'ANIME';
+            nombreSerie = args.slice(6);
+        } else if (args.toLowerCase().startsWith('manga ')) {
+            tipo = 'MANGA';
+            nombreSerie = args.slice(6);
         }
 
         await message.reply(`🔍 Buscando información de **${nombreSerie}**...`);
 
-        const info = await buscarInfoAniList(nombreSerie, 'ANIME');
+        const info = await buscarInfoAniList(nombreSerie, tipo);
         if (info && info.data && info.data.Media) {
             const media = info.data.Media;
-            const titulo = media.title.romaji || media.title.english || nombreSerie;
+            const titulo = media.title.romaji || media.title.english || media.title.native || nombreSerie;
             
             const embed = new EmbedBuilder()
-                .setTitle(`📺 ${titulo}`)
-                .setColor(0xFF6B6B)
+                .setTitle(`🎬 ${titulo}`)
+                .setColor(media.coverImage?.color || 0xFF6B6B)
                 .setURL(media.siteUrl)
-                .addFields(
-                    { name: 'Estado', value: media.status || 'Desconocido', inline: true },
-                    { name: 'Episodios', value: (media.episodes || '?').toString(), inline: true },
-                    { name: 'Formato', value: media.format || '?', inline: true }
+                .setDescription(media.description ? 
+                    media.description.replace(/<br>/g, '\n').replace(/<[^>]*>/g, '').substring(0, 250) + '...' : 
+                    '*Sin descripción disponible*'
                 );
 
-            if (media.description) {
-                const descripcionLimpia = media.description.replace(/<br>/g, '\n').replace(/<[^>]*>/g, '');
-                embed.setDescription(descripcionLimpia.substring(0, 200) + '...');
+            if (media.bannerImage) {
+                embed.setImage(media.bannerImage);
+            }
+            if (media.coverImage?.extraLarge) {
+                embed.setThumbnail(media.coverImage.extraLarge);
             }
 
+            const fields = [];
+            
+            fields.push({ 
+                name: '📋 Tipo', 
+                value: `${media.type || '?'} • ${media.format || '?'}`, 
+                inline: true 
+            });
+            
+            fields.push({ 
+                name: '📊 Estado', 
+                value: media.status || 'Desconocido', 
+                inline: true 
+            });
+            
+            if (media.averageScore) {
+                fields.push({ 
+                    name: '⭐ Puntuación', 
+                    value: `${media.averageScore}/100`, 
+                    inline: true 
+                });
+            }
+
+            if (media.type === 'ANIME') {
+                if (media.episodes) {
+                    fields.push({ 
+                        name: '🎞️ Episodios', 
+                        value: media.episodes.toString(), 
+                        inline: true 
+                    });
+                }
+                if (media.duration) {
+                    fields.push({ 
+                        name: '⏱️ Duración', 
+                        value: `${media.duration} min`, 
+                        inline: true 
+                    });
+                }
+                if (media.nextAiringEpisode) {
+                    const fecha = new Date(media.nextAiringEpisode.airingAt * 1000);
+                    fields.push({ 
+                        name: '🕐 Próximo episodio', 
+                        value: `Episodio ${media.nextAiringEpisode.episode}\n<t:${media.nextAiringEpisode.airingAt}:R>`, 
+                        inline: true 
+                    });
+                }
+            } else if (media.type === 'MANGA') {
+                if (media.chapters) {
+                    fields.push({ 
+                        name: '📖 Capítulos', 
+                        value: media.chapters.toString(), 
+                        inline: true 
+                    });
+                }
+                if (media.volumes) {
+                    fields.push({ 
+                        name: '📚 Volúmenes', 
+                        value: media.volumes.toString(), 
+                        inline: true 
+                    });
+                }
+            }
+
+            if (media.startDate?.year) {
+                const fechaInicio = `${media.startDate.year}-${media.startDate.month || '?'}-${media.startDate.day || '?'}`;
+                const fechaFin = media.endDate?.year ? 
+                    `${media.endDate.year}-${media.endDate.month || '?'}-${media.endDate.day || '?'}` : 'En emisión';
+                
+                fields.push({ 
+                    name: '📅 Emisión', 
+                    value: `${fechaInicio} a ${fechaFin}`, 
+                    inline: true 
+                });
+            }
+
+            if (media.genres && media.genres.length > 0) {
+                fields.push({ 
+                    name: '🏷️ Géneros', 
+                    value: media.genres.slice(0, 3).join(', '), 
+                    inline: true 
+                });
+            }
+
+            if (media.studios?.edges && media.studios.edges.length > 0) {
+                const estudios = media.studios.edges
+                    .filter(edge => edge.isMain)
+                    .map(edge => edge.node.name)
+                    .join(', ');
+                if (estudios) {
+                    fields.push({ 
+                        name: '🎨 Estudio', 
+                        value: estudios, 
+                        inline: true 
+                    });
+                }
+            }
+
+            embed.addFields(fields);
             await message.reply({ embeds: [embed] });
         } else {
             await message.reply('❌ No se pudo encontrar información de esa serie');
@@ -357,6 +640,10 @@ client.on('messageCreate', async (message) => {
                     { name: 'Enlace', value: `[AniList](${media.siteUrl})`, inline: true }
                 );
 
+            if (media.coverImage?.large) {
+                embed.setThumbnail(media.coverImage.large);
+            }
+
             await message.reply({ embeds: [embed] });
         } else {
             await message.reply('❌ No se pudo encontrar información de Roshidere');
@@ -378,6 +665,9 @@ client.on('messageCreate', async (message) => {
                 value: `Capítulos: ${manga.chapters || '?'}\nEstado: ${manga.status}`,
                 inline: true
             });
+            if (manga.coverImage?.large) {
+                embed.setThumbnail(manga.coverImage.large);
+            }
         }
 
         if (infoAnime?.data?.Media) {
@@ -396,6 +686,117 @@ client.on('messageCreate', async (message) => {
         await message.reply('🔍 Forzando verificación...');
         await verificarNoticias();
         await message.reply('✅ Verificación completada');
+    }
+
+    if (message.content === '!notificaciones on') {
+        CONFIG.usuariosNotificados.add(message.author.id);
+        await message.reply('✅ ¡Ahora recibirás notificaciones de anime!');
+    }
+
+    if (message.content === '!notificaciones off') {
+        CONFIG.usuariosNotificados.delete(message.author.id);
+        await message.reply('❌ Notificaciones desactivadas.');
+    }
+
+    if (message.content === '!invitar') {
+        const inviteLink = `https://discord.com/oauth2/authorize?client_id=1429393439174664222&scope=bot&permissions=277025770560`;
+        await message.reply(`📨 Invita el bot a otros servidores: ${inviteLink}`);
+    }
+
+    if (message.content === '!doblajes') {
+        await message.reply('🎙️ Buscando noticias de doblajes...');
+        const noticiasDoblaje = await buscarNoticiasDoblaje();
+        
+        if (noticiasDoblaje.length > 0) {
+            const embed = new EmbedBuilder()
+                .setTitle('🎙️ Últimas Noticias de Doblajes')
+                .setColor(0x9B59B6)
+                .setDescription(noticiasDoblaje.slice(0, 5).map((noticia, index) => 
+                    `${index + 1}. [${noticia.titulo}](${noticia.url})`
+                ).join('\n'));
+            
+            await message.reply({ embeds: [embed] });
+        } else {
+            await message.reply('❌ No se encontraron noticias de doblajes recientes.');
+        }
+    }
+
+    if (message.content === '!ayuda' || message.content === '!help') {
+        const embed = new EmbedBuilder()
+            .setTitle('📖 Comandos Disponibles')
+            .setColor(0x3498DB)
+            .addFields(
+                { 
+                    name: '⚙️ Configuración', 
+                    value: '`!setup #canal @rol` - Configurar canal y rol\n`!estado` - Ver estado actual' 
+                },
+                { 
+                    name: '🔔 Notificaciones', 
+                    value: '`!notificaciones on/off` - Activar/desactivar notificaciones personales' 
+                },
+                { 
+                    name: '📺 Gestión de Series', 
+                    value: '`!agregar anime/manga Nombre` - Agregar serie\n`!series` - Ver series seguidas\n`!info [anime/manga] Nombre` - Buscar información' 
+                },
+                { 
+                    name: '🔄 Verificación', 
+                    value: '`!forzar_verificacion` - Verificación manual\n`!noticias` - Últimas noticias\n`!doblajes` - Noticias de doblajes' 
+                },
+                { 
+                    name: '🎌 Series Específicas', 
+                    value: '`!roshidere` - Info Roshidere\n`!cien_novias` - Info 100 Girlfriends' 
+                },
+                { 
+                    name: '📨 Invitar', 
+                    value: '`!invitar` - Link para invitar el bot' 
+                }
+            )
+            .setFooter({ text: 'Monitoreo automático cada 10 minutos • Desarrollado con ❤️' });
+
+        await message.reply({ embeds: [embed] });
+    }
+});
+
+client.on('guildCreate', async (guild) => {
+    try {
+        const defaultChannel = guild.systemChannel || guild.channels.cache.find(channel => 
+            channel.type === 0 && channel.permissionsFor(guild.members.me).has('SendMessages')
+        );
+        
+        if (defaultChannel) {
+            const embed = new EmbedBuilder()
+                .setTitle('🎌 ¡Bot de Noticias de Anime Configurado!')
+                .setColor(0x00FF00)
+                .setDescription('Gracias por agregarme. Aquí están los comandos esenciales:')
+                .addFields(
+                    { 
+                        name: '⚙️ Configuración Básica', 
+                        value: '`!setup #canal @rol` - Configurar canal y rol para notificaciones' 
+                    },
+                    { 
+                        name: '🔔 Notificaciones Personales', 
+                        value: '`!notificaciones on` - Recibir notificaciones personalmente\n`!notificaciones off` - Desactivar notificaciones' 
+                    },
+                    { 
+                        name: '📺 Agregar Series', 
+                        value: '`!agregar anime Nombre Serie` - Seguir nuevo anime\n`!agregar manga Nombre Serie` - Seguir nuevo manga' 
+                    },
+                    { 
+                        name: '🔍 Comandos Útiles', 
+                        value: '`!estado` - Ver estado del bot\n`!series` - Ver series seguidas\n`!info [anime/manga] Nombre` - Buscar información\n`!forzar_verificacion` - Verificación manual' 
+                    },
+                    { 
+                        name: '📰 Qué monitorea', 
+                        value: '• Nuevos animes anunciados\n• Temporadas 2, 3, etc.\n• Filtraciones y rumores\n• Noticias de doblajes\n• Fechas de estreno\n• Noticias importantes' 
+                    }
+                )
+                .setFooter({ text: 'El bot verificará automáticamente cada 10 minutos' });
+
+            await defaultChannel.send({ embeds: [embed] });
+            console.log(`📨 Mensaje de bienvenida enviado a: ${guild.name}`);
+        }
+    } catch (error) {
+        console.error('Error enviando mensaje de bienvenida:', error);
     }
 });
 
