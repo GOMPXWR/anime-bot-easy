@@ -11,9 +11,17 @@ import axios from 'axios';
 
 const BOT_VERSION = '2.3.0';
 
+// Debug: Ver qué variables están disponibles
+console.log('🔍 Variables de entorno disponibles:');
+console.log('TOKEN existe:', !!process.env.TOKEN);
+console.log('CLIENT_ID existe:', !!process.env.CLIENT_ID);
+console.log('Todas las variables:', Object.keys(process.env));
+
 // Verificación básica de entorno
 if (!process.env.TOKEN || !process.env.CLIENT_ID) {
   console.error('❌ Faltan variables de entorno. Necesitas TOKEN y CLIENT_ID.');
+  console.error('TOKEN:', process.env.TOKEN ? 'Configurado' : 'FALTA');
+  console.error('CLIENT_ID:', process.env.CLIENT_ID ? 'Configurado' : 'FALTA');
   process.exit(1);
 }
 
