@@ -181,12 +181,40 @@ client.on('interactionCreate', async interaction => {
 
     else if (commandName === 'waifu') {
       await interaction.deferReply();
-      const { data } = await axios.get('https://api.waifu.pics/sfw/waifu');
-      const embed = new EmbedBuilder()
-        .setTitle('💖 Tu waifu de hoy')
-        .setImage(data.url)
-        .setColor(0xff6699);
-      await interaction.editReply({ embeds: [embed] });
+      try {
+        const { data } = await axios.get('https://api.waifu.im/search', {
+          params: {
+            included_tags: 'waifu',
+            is_nsfw: false
+          }
+        });
+        
+        const waifu = data.images[0];
+        const embed = new EmbedBuilder()
+          .setTitle('💖 Tu waifu de hoy')
+          .setImage(waifu.url)
+          .setColor(0xff6699);
+        
+        // Agregar información si está disponible
+        if (waifu.tags && waifu.tags.length > 0) {
+          const tags = waifu.tags.map(t => t.name).join(', ');
+          embed.addFields({ name: '🏷️ Tags', value: tags });
+        }
+        
+        if (waifu.source) {
+          embed.addFields({ name: '🔗 Fuente', value: `[Ver original](${waifu.source})` });
+        }
+        
+        await interaction.editReply({ embeds: [embed] });
+      } catch (error) {
+        // Si falla waifu.im, usar la API anterior como respaldo
+        const { data } = await axios.get('https://api.waifu.pics/sfw/waifu');
+        const embed = new EmbedBuilder()
+          .setTitle('💖 Tu waifu de hoy')
+          .setImage(data.url)
+          .setColor(0xff6699);
+        await interaction.editReply({ embeds: [embed] });
+      }
     }
 
     else if (commandName === 'trend') {
