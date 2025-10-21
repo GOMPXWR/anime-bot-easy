@@ -8,7 +8,6 @@ import {
   EmbedBuilder
 } from 'discord.js';
 import axios from 'axios';
-import 'dotenv/config';
 
 const BOT_VERSION = '2.3.0';
 
