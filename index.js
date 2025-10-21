@@ -1,820 +1,466 @@
-const { Client, GatewayIntentBits, EmbedBuilder, ActivityType } = require('discord.js');
-const axios = require('axios');
+// index.js - Single file bot (ESM) with slash commands
+import fs from 'fs';
+import path from 'path';
+import axios from 'axios';
+import fetch from 'node-fetch';
+import { fileURLToPath } from 'url';
+import { Client, GatewayIntentBits, Collection, Routes, SlashCommandBuilder, EmbedBuilder } from 'discord.js';
+import { REST } from '@discordjs/rest';
+import pkg from './package.json' assert { type: 'json' };
 
-const client = new Client({
-    intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildMembers
-    ]
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// CONFIG persistence (simple JSON)
+const CONFIG_FILE = path.join(__dirname, 'config.json');
+let CONFIG = { canalNoticias: null, rolMencion: null, seriesSeguidas: { anime: [], manga: [] }, ultimasNoticias: [] };
+try {
+  if (fs.existsSync(CONFIG_FILE)) CONFIG = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
+} catch (e) { console.error('No se pudo leer config.json:', e); }
+
+// helper to save config
+function saveConfig() {
+  try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(CONFIG, null, 2), 'utf-8'); } catch (e) { console.error('Error guardando config:', e); }
+}
+
+// env
+const TOKEN = process.env.TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID;
+
+if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
+  console.error('Faltan variables de entorno. Necesitas TOKEN, CLIENT_ID y GUILD_ID.');
+  process.exit(1);
+}
+
+const BOT_VERSION = pkg.version || '0.0.0';
+
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+client.commands = new Collection();
+
+// ---------- COMMAND DEFINITIONS (SlashCommandBuilder objects + execute) ----------
+const commands = [];
+
+// /version
+commands.push({
+  data: new SlashCommandBuilder().setName('version').setDescription('Muestra la versión actual del bot.'),
+  async execute(interaction) {
+    const embed = new EmbedBuilder()
+      .setTitle('📦 Versión del Bot')
+      .setColor(0x7289da)
+      .addFields(
+        { name: 'Versión', value: BOT_VERSION, inline: true },
+        { name: 'Estado', value: '✅ En línea', inline: true },
+        { name: 'Última actualización', value: new Date().toLocaleString('es-ES'), inline: false }
+      );
+    await interaction.reply({ embeds: [embed] });
+  }
 });
 
-console.log('🚀 Iniciando bot en Railway...');
-
-const CONFIG = {
-    canalNoticias: process.env.CANAL_NOTICIAS,
-    rolMencion: process.env.ROL_MENCION,
-    seriesSeguidas: {
-        manga: [
-            "The 100 Girlfriends Who Really, Really, Really, Really, Really Love You",
-            "One Piece",
-            "Spy x Family",
-            "Dandadan",
-            "When Will Her Tears Dry"
-        ],
-        anime: [
-            "The 100 Girlfriends Who Really, Really, Really, Really, Really Love You",
-            "Spy x Family",
-            "Dandadan", 
-            "When Will Her Tears Dry"
-        ]
-    },
-    ultimasNoticias: new Set(),
-    usuariosNotificados: new Set()
-};
-
-function esImagenValida(url) {
-    if (!url) return false;
-    return url.match(/\.(jpeg|jpg|gif|png|webp)$/) !== null || 
-           url.includes('i.redd.it') ||
-           url.includes('preview.redd.it');
-}
-
-client.once('ready', () => {
-    console.log(`✅ Bot conectado como ${client.user.tag}`);
-    client.user.setActivity('noticias de anime 🎬', { type: ActivityType.Watching });
-    
-    setInterval(verificarNoticias, 10 * 60 * 1000);
-    verificarNoticias();
-});
-
-async function verificarNoticias() {
+// /info tipo nombre
+commands.push({
+  data: new SlashCommandBuilder()
+    .setName('info')
+    .setDescription('Obtiene información de un anime o manga.')
+    .addStringOption(o => o.setName('tipo').setDescription('anime o manga').setRequired(true).addChoices({ name: 'Anime', value: 'anime' }, { name: 'Manga', value: 'manga' }))
+    .addStringOption(o => o.setName('nombre').setDescription('Nombre de la serie').setRequired(true)),
+  async execute(interaction) {
+    const tipo = interaction.options.getString('tipo');
+    const nombre = interaction.options.getString('nombre');
+    await interaction.deferReply();
     try {
-        console.log('🔍 Verificando noticias...');
-        if (!CONFIG.canalNoticias) {
-            console.log('⚠️ Canal no configurado. Usa !setup');
-            return;
-        }
-
-        const channel = await client.channels.fetch(CONFIG.canalNoticias);
-        if (!channel) {
-            console.log('❌ Canal no encontrado');
-            return;
-        }
-
-        const anuncios = await buscarAnunciosAniList();
-        const noticiasReddit = await buscarNoticiasReddit();
-        const noticiasDoblaje = await buscarNoticiasDoblaje();
-
-        for (const anuncio of anuncios) {
-            const idNoticia = `anuncio_${anuncio.titulo}`;
-            if (!CONFIG.ultimasNoticias.has(idNoticia)) {
-                const embed = new EmbedBuilder()
-                    .setTitle('🎊 ¡NUEVO ANIME ANUNCIADO!')
-                    .setDescription(`**${anuncio.titulo}**`)
-                    .setColor(0x00FF00)
-                    .setURL(anuncio.url)
-                    .addFields(
-                        { name: 'Formato', value: anuncio.formato, inline: true },
-                        { name: 'Fecha Est.', value: anuncio.fecha, inline: true }
-                    );
-
-                if (anuncio.imagen && esImagenValida(anuncio.imagen)) {
-                    embed.setImage(anuncio.imagen);
-                    embed.setThumbnail(anuncio.imagen);
-                }
-
-                const menciones = Array.from(CONFIG.usuariosNotificados).map(id => `<@${id}>`).join(' ');
-                const mensaje = menciones || '¡Nuevo anime anunciado!';
-                
-                await channel.send({ 
-                    content: mensaje,
-                    embeds: [embed] 
-                });
-                CONFIG.ultimasNoticias.add(idNoticia);
-                console.log(`📢 Nuevo anuncio: ${anuncio.titulo}`);
-            }
-        }
-
-        for (const noticia of noticiasReddit) {
-            const idNoticia = `reddit_${noticia.created}`;
-            if (!CONFIG.ultimasNoticias.has(idNoticia)) {
-                const embed = new EmbedBuilder()
-                    .setTitle('🔍 Posible Noticia/Filtración')
-                    .setDescription(noticia.titulo)
-                    .setColor(0xFF9900)
-                    .setURL(noticia.url)
-                    .addFields(
-                        { name: 'Fuente', value: `r/${noticia.subreddit}`, inline: true }
-                    );
-
-                if (noticia.imagen && esImagenValida(noticia.imagen)) {
-                    embed.setImage(noticia.imagen);
-                }
-
-                await channel.send({ embeds: [embed] });
-                CONFIG.ultimasNoticias.add(idNoticia);
-                console.log(`📰 Nueva noticia: ${noticia.titulo}`);
-            }
-        }
-
-        for (const noticia of noticiasDoblaje) {
-            const idNoticia = `doblaje_${noticia.created}`;
-            if (!CONFIG.ultimasNoticias.has(idNoticia)) {
-                const embed = new EmbedBuilder()
-                    .setTitle('🎙️ ¡Noticia de Doblaje!')
-                    .setDescription(`**${noticia.titulo}**`)
-                    .setColor(0x9B59B6)
-                    .setURL(noticia.url)
-                    .addFields(
-                        { name: 'Fuente', value: `r/${noticia.subreddit}`, inline: true },
-                        { name: 'Tipo', value: 'Doblaje/Localización', inline: true }
-                    );
-
-                if (noticia.imagen && esImagenValida(noticia.imagen)) {
-                    embed.setThumbnail(noticia.imagen);
-                }
-
-                await channel.send({ embeds: [embed] });
-                CONFIG.ultimasNoticias.add(idNoticia);
-                console.log(`🎙️ Nueva noticia de doblaje: ${noticia.titulo}`);
-            }
-        }
-
-        if (CONFIG.ultimasNoticias.size > 100) {
-            const arrayNoticias = Array.from(CONFIG.ultimasNoticias);
-            CONFIG.ultimasNoticias = new Set(arrayNoticias.slice(-100));
-        }
-    } catch (error) {
-        console.error('❌ Error en verificación:', error);
-    }
-}
-
-async function buscarAnunciosAniList() {
-    try {
-        const query = `
-            query {
-                Page(page: 1, perPage: 10) {
-                    media(status: NOT_YET_RELEASED, type: ANIME, sort: ID_DESC) {
-                        title { romaji english }
-                        startDate { year month day }
-                        siteUrl
-                        format
-                        coverImage { large medium }
-                    }
-                }
-            }
-        `;
-
-        const response = await axios.post('https://graphql.anilist.co', { query });
-        const anuncios = [];
-
-        for (const media of response.data.data.Page.media) {
-            const titulo = media.title.romaji || media.title.english;
-            if (titulo) {
-                anuncios.push({
-                    titulo: titulo,
-                    fecha: `${media.startDate.year}-${media.startDate.month}-${media.startDate.day}`,
-                    url: media.siteUrl,
-                    formato: media.format,
-                    imagen: media.coverImage?.large || media.coverImage?.medium
-                });
-            }
-        }
-        return anuncios;
-    } catch (error) {
-        console.error('Error en AniList:', error.message);
-        return [];
-    }
-}
-
-async function buscarNoticiasReddit() {
-    try {
-        const response = await axios.get('https://www.reddit.com/r/anime/new/.json?limit=15');
-        const noticias = [];
-
-        for (const post of response.data.data.children) {
-            const titulo = post.data.title.toLowerCase();
-            const keywords = [
-                'season 2', 'season 3', 'sequel', 'announced', 'confirmed',
-                'leak', 'rumor', 'adaptation', 'trailer', 'release date',
-                'anime awards', 'cancel', 'renewed', 'delay'
-            ];
-            const seriesEspecificas = [
-                'roshidere', '100 girlfriends', 'dandadan',
-                'spy x family', 'one piece', 'when will her tears dry'
-            ];
-
-            if (keywords.some(keyword => titulo.includes(keyword)) ||
-                seriesEspecificas.some(serie => titulo.includes(serie))) {
-                noticias.push({
-                    titulo: post.data.title,
-                    url: `https://reddit.com${post.data.permalink}`,
-                    subreddit: post.data.subreddit,
-                    created: post.data.created_utc,
-                    imagen: post.data.url_overridden_by_dest || post.data.thumbnail
-                });
-            }
-        }
-        return noticias;
-    } catch (error) {
-        console.error('Error en Reddit:', error.message);
-        return [];
-    }
-}
-
-async function buscarNoticiasDoblaje() {
-    try {
-        const subreddits = ['r/animedubs', 'r/anime', 'r/spanishdubs'];
-        const noticiasDoblaje = [];
-        
-        for (const subreddit of subreddits) {
-            try {
-                const response = await axios.get(`https://www.reddit.com/${subreddit}/new/.json?limit=8`);
-                
-                for (const post of response.data.data.children) {
-                    const titulo = post.data.title.toLowerCase();
-                    const keywordsDoblaje = [
-                        'dub', 'dubbed', 'doblaje', 'doblado', 'latino', 'español',
-                        'castellano', 'voice cast', 'seiyuu', 'english dub',
-                        'doblaje mexicano', 'doblaje latino', 'latam dub'
-                    ];
-                    
-                    if (keywordsDoblaje.some(keyword => titulo.includes(keyword))) {
-                        noticiasDoblaje.push({
-                            titulo: post.data.title,
-                            url: `https://reddit.com${post.data.permalink}`,
-                            subreddit: post.data.subreddit,
-                            created: post.data.created_utc,
-                            imagen: post.data.url_overridden_by_dest || post.data.thumbnail
-                        });
-                    }
-                }
-            } catch (error) {
-                console.error(`Error en subreddit ${subreddit}:`, error.message);
-            }
-        }
-        return noticiasDoblaje;
-    } catch (error) {
-        console.error('Error buscando noticias de doblaje:', error.message);
-        return [];
-    }
-}
-
-async function buscarInfoAniList(nombreSerie, tipo = null) {
-    try {
-        const query = `
-            query ($search: String, $type: MediaType) {
-                Media(search: $search, type: $type) {
-                    id
-                    title {
-                        romaji
-                        english
-                        native
-                    }
-                    type
-                    format
-                    status
-                    description
-                    startDate {
-                        year
-                        month
-                        day
-                    }
-                    endDate {
-                        year
-                        month
-                        day
-                    }
-                    season
-                    episodes
-                    chapters
-                    volumes
-                    duration
-                    source
-                    genres
-                    averageScore
-                    popularity
-                    trending
-                    favourites
-                    isAdult
-                    siteUrl
-                    coverImage {
-                        extraLarge
-                        large
-                        medium
-                        color
-                    }
-                    bannerImage
-                    relations {
-                        edges {
-                            node {
-                                title {
-                                    romaji
-                                    english
-                                }
-                                type
-                                format
-                                status
-                            }
-                            relationType
-                        }
-                    }
-                    nextAiringEpisode {
-                        episode
-                        airingAt
-                    }
-                    studios {
-                        edges {
-                            node {
-                                name
-                            }
-                            isMain
-                        }
-                    }
-                }
-            }
-        `;
-
-        let media = null;
-        
-        if (!tipo) {
-            const variablesAnime = { search: nombreSerie, type: 'ANIME' };
-            const responseAnime = await axios.post('https://graphql.anilist.co', {
-                query,
-                variables: variablesAnime
-            });
-            
-            if (responseAnime.data.data.Media) {
-                media = responseAnime.data.data.Media;
-            } else {
-                const variablesManga = { search: nombreSerie, type: 'MANGA' };
-                const responseManga = await axios.post('https://graphql.anilist.co', {
-                    query,
-                    variables: variablesManga
-                });
-                media = responseManga.data.data.Media;
-            }
-        } else {
-            const variables = { search: nombreSerie, type: tipo };
-            const response = await axios.post('https://graphql.anilist.co', {
-                query,
-                variables
-            });
-            media = response.data.data.Media;
-        }
-
-        return { data: { Media: media } };
-    } catch (error) {
-        console.error('Error buscando info:', error.message);
-        return null;
-    }
-}
-
-client.on('messageCreate', async (message) => {
-    if (message.author.bot) return;
-
-    if (message.content.startsWith('!setup')) {
-        if (!message.member.permissions.has('ADMINISTRATOR')) {
-            return message.reply('❌ Necesitas permisos de administrador.');
-        }
-        
-        CONFIG.canalNoticias = message.channel.id;
-        const rol = message.mentions.roles.first();
-        if (rol) CONFIG.rolMencion = rol.id;
-
-        const embed = new EmbedBuilder()
-            .setTitle('✅ Configuración Completada')
-            .setColor(0x00FF00)
-            .addFields(
-                { name: 'Canal de Noticias', value: `<#${CONFIG.canalNoticias}>`, inline: true },
-                { name: 'Rol de Mención', value: rol ? `<@&${CONFIG.rolMencion}>` : 'No configurado', inline: true }
-            );
-
-        await message.reply({ embeds: [embed] });
-        console.log('⚙️ Configuración actualizada via comando');
-    }
-
-    if (message.content === '!estado') {
-        const embed = new EmbedBuilder()
-            .setTitle('🤖 Estado del Bot')
-            .setColor(0x3498DB)
-            .addFields(
-                { name: 'Canal', value: CONFIG.canalNoticias ? `<#${CONFIG.canalNoticias}>` : 'No config', inline: true },
-                { name: 'Noticias', value: CONFIG.ultimasNoticias.size.toString(), inline: true },
-                { name: 'Usuarios Notif.', value: CONFIG.usuariosNotificados.size.toString(), inline: true },
-                { name: 'Ping', value: `${client.ws.ping}ms`, inline: true }
-            );
-
-        await message.reply({ embeds: [embed] });
-    }
-
-    if (message.content === '!test') {
-        await message.reply('✅ Bot funcionando correctamente!');
-    }
-
-    if (message.content.startsWith('!agregar')) {
-        const args = message.content.split(' ');
-        if (args.length < 3) {
-            return message.reply('❌ Uso: `!agregar manga/anime Nombre de la serie`');
-        }
-
-        const tipo = args[1].toLowerCase();
-        const nombreSerie = args.slice(2).join(' ');
-
-        if (tipo !== 'manga' && tipo !== 'anime') {
-            return message.reply('❌ Tipo debe ser `manga` o `anime`');
-        }
-
-        if (CONFIG.seriesSeguidas[tipo].includes(nombreSerie)) {
-            return message.reply(`❌ "${nombreSerie}" ya está en la lista de ${tipo}`);
-        }
-
-        CONFIG.seriesSeguidas[tipo].push(nombreSerie);
-        
-        const embed = new EmbedBuilder()
-            .setTitle('✅ Serie Agregada')
-            .setColor(0x00FF00)
-            .addFields(
-                { name: 'Tipo', value: tipo, inline: true },
-                { name: 'Serie', value: nombreSerie, inline: true },
-                { name: 'Total', value: CONFIG.seriesSeguidas[tipo].length.toString(), inline: true }
-            );
-
-        await message.reply({ embeds: [embed] });
-        console.log(`📝 Serie agregada: ${nombreSerie} (${tipo})`);
-    }
-
-    if (message.content === '!series') {
-        const embed = new EmbedBuilder()
-            .setTitle('📚 Series Seguidas')
-            .setColor(0x3498DB)
-            .addFields(
-                { 
-                    name: `🎬 Anime (${CONFIG.seriesSeguidas.anime.length})`, 
-                    value: CONFIG.seriesSeguidas.anime.slice(0, 10).join('\n') || 'Ninguna',
-                    inline: true 
-                },
-                { 
-                    name: `📖 Manga (${CONFIG.seriesSeguidas.manga.length})`, 
-                    value: CONFIG.seriesSeguidas.manga.slice(0, 10).join('\n') || 'Ninguna', 
-                    inline: true 
-                }
-            );
-
-        await message.reply({ embeds: [embed] });
-    }
-
-    if (message.content.startsWith('!info')) {
-        const args = message.content.slice(6).trim();
-        if (!args) {
-            return message.reply('❌ Uso: `!info Nombre de la serie` o `!info anime/manga Nombre`');
-        }
-
-        let tipo = null;
-        let nombreSerie = args;
-        
-        if (args.toLowerCase().startsWith('anime ')) {
-            tipo = 'ANIME';
-            nombreSerie = args.slice(6);
-        } else if (args.toLowerCase().startsWith('manga ')) {
-            tipo = 'MANGA';
-            nombreSerie = args.slice(6);
-        }
-
-        await message.reply(`🔍 Buscando información de **${nombreSerie}**...`);
-
-        const info = await buscarInfoAniList(nombreSerie, tipo);
-        if (info && info.data && info.data.Media) {
-            const media = info.data.Media;
-            const titulo = media.title.romaji || media.title.english || media.title.native || nombreSerie;
-            
-            const embed = new EmbedBuilder()
-                .setTitle(`🎬 ${titulo}`)
-                .setColor(media.coverImage?.color || 0xFF6B6B)
-                .setURL(media.siteUrl)
-                .setDescription(media.description ? 
-                    media.description.replace(/<br>/g, '\n').replace(/<[^>]*>/g, '').substring(0, 250) + '...' : 
-                    '*Sin descripción disponible*'
-                );
-
-            if (media.bannerImage) {
-                embed.setImage(media.bannerImage);
-            }
-            if (media.coverImage?.extraLarge) {
-                embed.setThumbnail(media.coverImage.extraLarge);
-            }
-
-            const fields = [];
-            
-            fields.push({ 
-                name: '📋 Tipo', 
-                value: `${media.type || '?'} • ${media.format || '?'}`, 
-                inline: true 
-            });
-            
-            fields.push({ 
-                name: '📊 Estado', 
-                value: media.status || 'Desconocido', 
-                inline: true 
-            });
-            
-            if (media.averageScore) {
-                fields.push({ 
-                    name: '⭐ Puntuación', 
-                    value: `${media.averageScore}/100`, 
-                    inline: true 
-                });
-            }
-
-            if (media.type === 'ANIME') {
-                if (media.episodes) {
-                    fields.push({ 
-                        name: '🎞️ Episodios', 
-                        value: media.episodes.toString(), 
-                        inline: true 
-                    });
-                }
-                if (media.duration) {
-                    fields.push({ 
-                        name: '⏱️ Duración', 
-                        value: `${media.duration} min`, 
-                        inline: true 
-                    });
-                }
-                if (media.nextAiringEpisode) {
-                    const fecha = new Date(media.nextAiringEpisode.airingAt * 1000);
-                    fields.push({ 
-                        name: '🕐 Próximo episodio', 
-                        value: `Episodio ${media.nextAiringEpisode.episode}\n<t:${media.nextAiringEpisode.airingAt}:R>`, 
-                        inline: true 
-                    });
-                }
-            } else if (media.type === 'MANGA') {
-                if (media.chapters) {
-                    fields.push({ 
-                        name: '📖 Capítulos', 
-                        value: media.chapters.toString(), 
-                        inline: true 
-                    });
-                }
-                if (media.volumes) {
-                    fields.push({ 
-                        name: '📚 Volúmenes', 
-                        value: media.volumes.toString(), 
-                        inline: true 
-                    });
-                }
-            }
-
-            if (media.startDate?.year) {
-                const fechaInicio = `${media.startDate.year}-${media.startDate.month || '?'}-${media.startDate.day || '?'}`;
-                const fechaFin = media.endDate?.year ? 
-                    `${media.endDate.year}-${media.endDate.month || '?'}-${media.endDate.day || '?'}` : 'En emisión';
-                
-                fields.push({ 
-                    name: '📅 Emisión', 
-                    value: `${fechaInicio} a ${fechaFin}`, 
-                    inline: true 
-                });
-            }
-
-            if (media.genres && media.genres.length > 0) {
-                fields.push({ 
-                    name: '🏷️ Géneros', 
-                    value: media.genres.slice(0, 3).join(', '), 
-                    inline: true 
-                });
-            }
-
-            if (media.studios?.edges && media.studios.edges.length > 0) {
-                const estudios = media.studios.edges
-                    .filter(edge => edge.isMain)
-                    .map(edge => edge.node.name)
-                    .join(', ');
-                if (estudios) {
-                    fields.push({ 
-                        name: '🎨 Estudio', 
-                        value: estudios, 
-                        inline: true 
-                    });
-                }
-            }
-
-            embed.addFields(fields);
-            await message.reply({ embeds: [embed] });
-        } else {
-            await message.reply('❌ No se pudo encontrar información de esa serie');
-        }
-    }
-
-    if (message.content === '!noticias') {
-        const ultimasNoticias = Array.from(CONFIG.ultimasNoticias).slice(-5);
-        
-        const embed = new EmbedBuilder()
-            .setTitle('📰 Últimas 5 Noticias')
-            .setColor(0x9B59B6);
-
-        if (ultimasNoticias.length > 0) {
-            embed.setDescription('IDs de las últimas noticias detectadas:\n' + ultimasNoticias.join('\n'));
-        } else {
-            embed.setDescription('No hay noticias recientes');
-        }
-
-        await message.reply({ embeds: [embed] });
-    }
-
-    if (message.content === '!roshidere') {
-        const info = await buscarInfoAniList("When Will Her Tears Dry", "MANGA");
-        if (info && info.data && info.data.Media) {
-            const media = info.data.Media;
-            const titulo = media.title.romaji || media.title.english;
-            
-            const embed = new EmbedBuilder()
-                .setTitle(`📖 ${titulo}`)
-                .setColor(0xFF6B6B)
-                .addFields(
-                    { name: 'Estado', value: media.status, inline: true },
-                    { name: 'Capítulos', value: media.chapters?.toString() || 'Desconocido', inline: true },
-                    { name: 'Enlace', value: `[AniList](${media.siteUrl})`, inline: true }
-                );
-
-            if (media.coverImage?.large) {
-                embed.setThumbnail(media.coverImage.large);
-            }
-
-            await message.reply({ embeds: [embed] });
-        } else {
-            await message.reply('❌ No se pudo encontrar información de Roshidere');
-        }
-    }
-
-    if (message.content === '!cien_novias') {
-        const infoManga = await buscarInfoAniList("The 100 Girlfriends Who Really, Really, Really, Really, Really Love You", "MANGA");
-        const infoAnime = await buscarInfoAniList("The 100 Girlfriends Who Really, Really, Really, Really, Really Love You", "ANIME");
-        
-        const embed = new EmbedBuilder()
-            .setTitle('💕 100 Girlfriends Info')
-            .setColor(0xFF6B6B);
-
-        if (infoManga?.data?.Media) {
-            const manga = infoManga.data.Media;
-            embed.addFields({
-                name: '📖 Manga',
-                value: `Capítulos: ${manga.chapters || '?'}\nEstado: ${manga.status}`,
-                inline: true
-            });
-            if (manga.coverImage?.large) {
-                embed.setThumbnail(manga.coverImage.large);
-            }
-        }
-
-        if (infoAnime?.data?.Media) {
-            const anime = infoAnime.data.Media;
-            embed.addFields({
-                name: '🎬 Anime', 
-                value: `Episodios: ${anime.episodes || '?'}\nEstado: ${anime.status}`,
-                inline: true
-            });
-        }
-
-        await message.reply({ embeds: [embed] });
-    }
-
-    if (message.content === '!forzar_verificacion') {
-        await message.reply('🔍 Forzando verificación...');
-        await verificarNoticias();
-        await message.reply('✅ Verificación completada');
-    }
-
-    if (message.content === '!notificaciones on') {
-        CONFIG.usuariosNotificados.add(message.author.id);
-        await message.reply('✅ ¡Ahora recibirás notificaciones de anime!');
-    }
-
-    if (message.content === '!notificaciones off') {
-        CONFIG.usuariosNotificados.delete(message.author.id);
-        await message.reply('❌ Notificaciones desactivadas.');
-    }
-
-    if (message.content === '!invitar') {
-        const inviteLink = `https://discord.com/oauth2/authorize?client_id=1429393439174664222&scope=bot&permissions=277025770560`;
-        await message.reply(`📨 Invita el bot a otros servidores: ${inviteLink}`);
-    }
-
-    if (message.content === '!doblajes') {
-        await message.reply('🎙️ Buscando noticias de doblajes...');
-        const noticiasDoblaje = await buscarNoticiasDoblaje();
-        
-        if (noticiasDoblaje.length > 0) {
-            const embed = new EmbedBuilder()
-                .setTitle('🎙️ Últimas Noticias de Doblajes')
-                .setColor(0x9B59B6)
-                .setDescription(noticiasDoblaje.slice(0, 5).map((noticia, index) => 
-                    `${index + 1}. [${noticia.titulo}](${noticia.url})`
-                ).join('\n'));
-            
-            await message.reply({ embeds: [embed] });
-        } else {
-            await message.reply('❌ No se encontraron noticias de doblajes recientes.');
-        }
-    }
-
-    if (message.content === '!ayuda' || message.content === '!help') {
-        const embed = new EmbedBuilder()
-            .setTitle('📖 Comandos Disponibles')
-            .setColor(0x3498DB)
-            .addFields(
-                { 
-                    name: '⚙️ Configuración', 
-                    value: '`!setup #canal @rol` - Configurar canal y rol\n`!estado` - Ver estado actual' 
-                },
-                { 
-                    name: '🔔 Notificaciones', 
-                    value: '`!notificaciones on/off` - Activar/desactivar notificaciones personales' 
-                },
-                { 
-                    name: '📺 Gestión de Series', 
-                    value: '`!agregar anime/manga Nombre` - Agregar serie\n`!series` - Ver series seguidas\n`!info [anime/manga] Nombre` - Buscar información' 
-                },
-                { 
-                    name: '🔄 Verificación', 
-                    value: '`!forzar_verificacion` - Verificación manual\n`!noticias` - Últimas noticias\n`!doblajes` - Noticias de doblajes' 
-                },
-                { 
-                    name: '🎌 Series Específicas', 
-                    value: '`!roshidere` - Info Roshidere\n`!cien_novias` - Info 100 Girlfriends' 
-                },
-                { 
-                    name: '📨 Invitar', 
-                    value: '`!invitar` - Link para invitar el bot' 
-                }
-            )
-            .setFooter({ text: 'Monitoreo automático cada 10 minutos • Desarrollado con ❤️' });
-
-        await message.reply({ embeds: [embed] });
-    }
-});
-
-client.on('guildCreate', async (guild) => {
-    try {
-        const defaultChannel = guild.systemChannel || guild.channels.cache.find(channel => 
-            channel.type === 0 && channel.permissionsFor(guild.members.me).has('SendMessages')
+      const url = `https://api.jikan.moe/v4/${tipo}?q=${encodeURIComponent(nombre)}&limit=1`;
+      const res = await axios.get(url);
+      const item = res.data.data?.[0];
+      if (!item) return interaction.editReply(`❌ No encontré resultados para **${nombre}** (${tipo}).`);
+      const title = item.title || item.title_english || item.title_japanese || item.name || nombre;
+      const synopsis = item.synopsis || item.description || 'Sin descripción disponible.';
+      const embed = new EmbedBuilder()
+        .setTitle(`${title}`)
+        .setURL(item.url || item.link || '')
+        .setDescription(synopsis.length > 500 ? synopsis.substring(0, 500) + '...' : synopsis)
+        .setColor(0xf47fff);
+
+      // thumbnail/banner
+      const thumb = item.images?.jpg?.image_url || item.image_url || item.images?.webp?.large_image_url;
+      if (thumb) embed.setThumbnail(thumb);
+
+      // fields
+      if (tipo === 'anime') {
+        embed.addFields(
+          { name: '📺 Tipo', value: item.type || 'Desconocido', inline: true },
+          { name: '⭐ Puntuación', value: item.score ? `${item.score}/10` : 'N/A', inline: true },
+          { name: '🗓️ Emisión', value: item.aired?.string || item.published?.string || (item.status || 'Desconocido'), inline: false }
         );
-        
-        if (defaultChannel) {
-            const embed = new EmbedBuilder()
-                .setTitle('🎌 ¡Bot de Noticias de Anime Configurado!')
-                .setColor(0x00FF00)
-                .setDescription('Gracias por agregarme. Aquí están los comandos esenciales:')
-                .addFields(
-                    { 
-                        name: '⚙️ Configuración Básica', 
-                        value: '`!setup #canal @rol` - Configurar canal y rol para notificaciones' 
-                    },
-                    { 
-                        name: '🔔 Notificaciones Personales', 
-                        value: '`!notificaciones on` - Recibir notificaciones personalmente\n`!notificaciones off` - Desactivar notificaciones' 
-                    },
-                    { 
-                        name: '📺 Agregar Series', 
-                        value: '`!agregar anime Nombre Serie` - Seguir nuevo anime\n`!agregar manga Nombre Serie` - Seguir nuevo manga' 
-                    },
-                    { 
-                        name: '🔍 Comandos Útiles', 
-                        value: '`!estado` - Ver estado del bot\n`!series` - Ver series seguidas\n`!info [anime/manga] Nombre` - Buscar información\n`!forzar_verificacion` - Verificación manual' 
-                    },
-                    { 
-                        name: '📰 Qué monitorea', 
-                        value: '• Nuevos animes anunciados\n• Temporadas 2, 3, etc.\n• Filtraciones y rumores\n• Noticias de doblajes\n• Fechas de estreno\n• Noticias importantes' 
-                    }
-                )
-                .setFooter({ text: 'El bot verificará automáticamente cada 10 minutos' });
+        if (item.episodes) embed.addFields({ name: '🎞️ Episodios', value: String(item.episodes), inline: true });
+        if (item.duration) embed.addFields({ name: '⏱️ Duración', value: item.duration, inline: true });
+      } else {
+        embed.addFields(
+          { name: '📖 Tipo', value: item.type || 'Desconocido', inline: true },
+          { name: '⭐ Puntuación', value: item.score ? `${item.score}/10` : 'N/A', inline: true },
+          { name: '📚 Publicación', value: item.published?.string || item.status || 'Desconocido', inline: false }
+        );
+        if (item.chapters) embed.addFields({ name: 'Capítulos', value: String(item.chapters), inline: true });
+        if (item.volumes) embed.addFields({ name: 'Volúmenes', value: String(item.volumes), inline: true });
+      }
 
-            await defaultChannel.send({ embeds: [embed] });
-            console.log(`📨 Mensaje de bienvenida enviado a: ${guild.name}`);
-        }
-    } catch (error) {
-        console.error('Error enviando mensaje de bienvenida:', error);
+      await interaction.editReply({ embeds: [embed] });
+    } catch (err) {
+      console.error('Error /info:', err?.response?.data || err.message || err);
+      await interaction.editReply('⚠️ Error al obtener la información (API Jikan). Intenta de nuevo.');
     }
+  }
 });
 
-client.on('error', (error) => {
-    console.error('❌ Error del cliente:', error);
+// /noticias tipo
+commands.push({
+  data: new SlashCommandBuilder()
+    .setName('noticias')
+    .setDescription('Muestra noticias recientes de anime o manga.')
+    .addStringOption(o => o.setName('tipo').setDescription('anime o manga').setRequired(true).addChoices({ name: 'Anime', value: 'anime' }, { name: 'Manga', value: 'manga' })),
+  async execute(interaction) {
+    const tipo = interaction.options.getString('tipo');
+    await interaction.deferReply();
+    try {
+      // Jikan has /v4/news?type=anime (useful)
+      const url = `https://api.jikan.moe/v4/news?type=${tipo}`;
+      const res = await axios.get(url);
+      const news = res.data.data?.slice(0, 5) || [];
+      if (!news.length) return interaction.editReply('No se encontraron noticias recientes.');
+      const embed = new EmbedBuilder()
+        .setTitle(`📰 Noticias recientes (${tipo})`)
+        .setColor(0x9B59B6)
+        .setFooter({ text: 'Fuente: MyAnimeList / Jikan' });
+
+      news.forEach(n => {
+        const title = n.title?.substring(0, 80) || 'Noticia';
+        const urlN = n.url || n.link || '';
+        embed.addFields({ name: title, value: urlN || '(Sin enlace)', inline: false });
+      });
+
+      await interaction.editReply({ embeds: [embed] });
+    } catch (err) {
+      console.error('Error /noticias:', err?.response?.data || err.message || err);
+      await interaction.editReply('⚠️ No se pudieron cargar las noticias (API).');
+    }
+  }
 });
 
-process.on('unhandledRejection', (error) => {
-    console.error('❌ Error no manejado:', error);
+// /recomendacion genero
+commands.push({
+  data: new SlashCommandBuilder()
+    .setName('recomendacion')
+    .setDescription('Recomienda un anime/manga por género.')
+    .addStringOption(o => o.setName('genero').setDescription('Ej: romance, accion, comedia').setRequired(true))
+    .addStringOption(o => o.setName('tipo').setDescription('anime o manga').setRequired(false).addChoices({ name: 'Anime', value: 'anime' }, { name: 'Manga', value: 'manga' })),
+  async execute(interaction) {
+    const genero = interaction.options.getString('genero');
+    const tipo = interaction.options.getString('tipo') || 'anime';
+    await interaction.deferReply();
+    try {
+      // Buscar varios resultados y filtrar por genero en la respuesta
+      const url = `https://api.jikan.moe/v4/${tipo}?q=&genres=${encodeURIComponent(genero)}&limit=15`;
+      // Note: Jikan expects numeric genre ids, but to keep simple we'll do general search and filter locally by genre name (less precise)
+      const searchUrl = `https://api.jikan.moe/v4/${tipo}?q=${encodeURIComponent(genero)}&limit=25`;
+      const res = await axios.get(searchUrl);
+      const list = res.data.data || [];
+      // prefer items that contain genre name in genres array
+      const filtered = list.filter(it => {
+        const genres = (it.genres || []).map(g => g.name.toLowerCase());
+        return genres.some(g => g.includes(genero.toLowerCase()));
+      });
+      const pool = filtered.length ? filtered : list;
+      if (!pool.length) return interaction.editReply(`No encontré recomendaciones para "${genero}".`);
+      const pick = pool[Math.floor(Math.random() * pool.length)];
+      const embed = new EmbedBuilder()
+        .setTitle(pick.title || pick.name)
+        .setURL(pick.url || '')
+        .setDescription((pick.synopsis || '').substring(0, 400) || 'Sin descripción disponible.')
+        .setThumbnail(pick.images?.jpg?.image_url || '')
+        .addFields(
+          { name: 'Tipo', value: tipo, inline: true },
+          { name: 'Puntuación', value: pick.score ? `${pick.score}/10` : 'N/A', inline: true }
+        )
+        .setFooter({ text: `Recomendación para: ${genero}` });
+      await interaction.editReply({ embeds: [embed] });
+    } catch (err) {
+      console.error('Error /recomendacion:', err?.response?.data || err.message || err);
+      await interaction.editReply('⚠️ Error al buscar recomendaciones.');
+    }
+  }
 });
 
-const token = process.env.DISCORD_TOKEN;
-if (!token) {
-    console.error('❌ ERROR: No se encontró DISCORD_TOKEN');
-    process.exit(1);
+// /waifu - usa waifu.pics (sfw)
+commands.push({
+  data: new SlashCommandBuilder().setName('waifu').setDescription('Muestra una waifu aleatoria (imagen SFW).'),
+  async execute(interaction) {
+    await interaction.deferReply();
+    try {
+      const res = await fetch('https://api.waifu.pics/sfw/waifu');
+      const data = await res.json();
+      const embed = new EmbedBuilder()
+        .setTitle('💖 Waifu aleatoria')
+        .setImage(data.url)
+        .setColor(0xff8fb1)
+        .setFooter({ text: 'Fuente: waifu.pics' });
+      await interaction.editReply({ embeds: [embed] });
+    } catch (err) {
+      console.error('Error /waifu:', err);
+      await interaction.editReply('⚠️ No pude traer una waifu ahora.');
+    }
+  }
+});
+
+// /trend tipo
+commands.push({
+  data: new SlashCommandBuilder()
+    .setName('trend')
+    .setDescription('Muestra los top en tendencia (anime/manga).')
+    .addStringOption(o => o.setName('tipo').setDescription('anime o manga').setRequired(true).addChoices({ name: 'Anime', value: 'anime' }, { name: 'Manga', value: 'manga' })),
+  async execute(interaction) {
+    const tipo = interaction.options.getString('tipo');
+    await interaction.deferReply();
+    try {
+      const url = `https://api.jikan.moe/v4/top/${tipo}?limit=5`;
+      const res = await axios.get(url);
+      const tops = res.data.data || [];
+      const embed = new EmbedBuilder()
+        .setTitle(`🔥 Top ${tipo}`)
+        .setColor(0xffc107)
+        .setFooter({ text: 'Fuente: Jikan (MyAnimeList)' });
+      tops.forEach((t, i) => {
+        embed.addFields({ name: `${i + 1}. ${t.title}`, value: `Score: ${t.score || 'N/A'} • Type: ${t.type || '?'}` });
+      });
+      await interaction.editReply({ embeds: [embed] });
+    } catch (err) {
+      console.error('Error /trend:', err?.response?.data || err.message || err);
+      await interaction.editReply('⚠️ No pude obtener tendencias.');
+    }
+  }
+});
+
+// /opinion tema
+commands.push({
+  data: new SlashCommandBuilder().setName('opinion').setDescription('Da una opinión divertida sobre un tema.').addStringOption(o => o.setName('tema').setDescription('Tema para opinar').setRequired(true)),
+  async execute(interaction) {
+    const tema = interaction.options.getString('tema');
+    const templates = [
+      `Bro, ${tema} es como spoiler: emocionante, pero te arrepentirás a las 3 AM.`,
+      `Mi opinión sobre ${tema}: más hype que relleno.`,
+      `${tema}? Ponlo en la lista, pero no lo veas antes de dormir.`,
+      `Si ${tema} fuera un personaje, sería el de apoyo que roba escena.`
+    ];
+    const chosen = templates[Math.floor(Math.random() * templates.length)];
+    await interaction.reply(chosen);
+  }
+});
+
+// /setup canal rol
+commands.push({
+  data: new SlashCommandBuilder()
+    .setName('setup')
+    .setDescription('Configura canal de noticias y rol de mención.')
+    .addChannelOption(o => o.setName('canal').setDescription('Canal de noticias').setRequired(true))
+    .addRoleOption(o => o.setName('rol').setDescription('Rol a mencionar').setRequired(false)),
+  async execute(interaction) {
+    if (!interaction.memberPermissions?.has?.('Administrator')) {
+      return interaction.reply({ content: '❌ Necesitas permisos de administrador para configurar.', ephemeral: true });
+    }
+    const canal = interaction.options.getChannel('canal');
+    const rol = interaction.options.getRole('rol');
+    CONFIG.canalNoticias = canal.id;
+    CONFIG.rolMencion = rol?.id || null;
+    saveConfig();
+    const embed = new EmbedBuilder()
+      .setTitle('✅ Configuración guardada')
+      .addFields(
+        { name: 'Canal', value: `<#${CONFIG.canalNoticias}>`, inline: true },
+        { name: 'Rol', value: CONFIG.rolMencion ? `<@&${CONFIG.rolMencion}>` : 'No configurado', inline: true }
+      )
+      .setColor(0x00FF00);
+    await interaction.reply({ embeds: [embed] });
+  }
+});
+
+// /estado
+commands.push({
+  data: new SlashCommandBuilder().setName('estado').setDescription('Muestra el estado del bot.'),
+  async execute(interaction) {
+    const embed = new EmbedBuilder()
+      .setTitle('🤖 Estado del Bot')
+      .setColor(0x3498DB)
+      .addFields(
+        { name: 'Canal', value: CONFIG.canalNoticias ? `<#${CONFIG.canalNoticias}>` : 'No configurado', inline: true },
+        { name: 'Series seguidas (anime)', value: String(CONFIG.seriesSeguidas.anime.length), inline: true },
+        { name: 'Series seguidas (manga)', value: String(CONFIG.seriesSeguidas.manga.length), inline: true },
+        { name: 'Ping', value: `${client.ws.ping}ms`, inline: true }
+      );
+    await interaction.reply({ embeds: [embed] });
+  }
+});
+
+// /test
+commands.push({
+  data: new SlashCommandBuilder().setName('test').setDescription('Prueba si el bot responde.'),
+  async execute(interaction) { await interaction.reply('✅ Bot funcionando correctamente!'); }
+});
+
+// /agregar tipo nombre
+commands.push({
+  data: new SlashCommandBuilder()
+    .setName('agregar')
+    .setDescription('Agrega un anime o manga a la lista.')
+    .addStringOption(o => o.setName('tipo').setDescription('anime o manga').setRequired(true).addChoices({ name: 'Anime', value: 'anime' }, { name: 'Manga', value: 'manga' }))
+    .addStringOption(o => o.setName('nombre').setDescription('Nombre de la serie').setRequired(true)),
+  async execute(interaction) {
+    const tipo = interaction.options.getString('tipo');
+    const nombre = interaction.options.getString('nombre');
+    if (!CONFIG.seriesSeguidas[tipo]) CONFIG.seriesSeguidas[tipo] = [];
+    if (CONFIG.seriesSeguidas[tipo].includes(nombre)) return interaction.reply({ content: `❌ "${nombre}" ya está en la lista de ${tipo}.`, ephemeral: true });
+    CONFIG.seriesSeguidas[tipo].push(nombre);
+    saveConfig();
+    await interaction.reply(`✅ Agregado "${nombre}" a ${tipo}. Total: ${CONFIG.seriesSeguidas[tipo].length}`);
+  }
+});
+
+// /series
+commands.push({
+  data: new SlashCommandBuilder().setName('series').setDescription('Muestra las series que se siguen.'),
+  async execute(interaction) {
+    const animeList = CONFIG.seriesSeguidas.anime.slice(0, 20).join('\n') || 'Ninguna';
+    const mangaList = CONFIG.seriesSeguidas.manga.slice(0, 20).join('\n') || 'Ninguna';
+    const embed = new EmbedBuilder()
+      .setTitle('📚 Series Seguidas')
+      .addFields(
+        { name: `🎬 Anime (${CONFIG.seriesSeguidas.anime.length})`, value: animeList, inline: true },
+        { name: `📖 Manga (${CONFIG.seriesSeguidas.manga.length})`, value: mangaList, inline: true }
+      )
+      .setColor(0x2ecc71);
+    await interaction.reply({ embeds: [embed] });
+  }
+});
+
+// /forzar_verificacion (manual)
+commands.push({
+  data: new SlashCommandBuilder().setName('forzar_verificacion').setDescription('Forzar verificación manual de noticias (admin).'),
+  async execute(interaction) {
+    if (!interaction.memberPermissions?.has?.('Administrator')) return interaction.reply({ content: '❌ Necesitas permisos de administrador.', ephemeral: true });
+    await interaction.reply('🔍 Forzando verificación de noticias...');
+    // pequeña función de ejemplo para chequear anuncios AniList (puede extenderse)
+    try {
+      // comprobación simple: revisar anuncios de AniList (media NOT_YET_RELEASED)
+      const query = `query { Page(page:1, perPage:5) { media(status:NOT_YET_RELEASED, type:ANIME, sort:ID_DESC) { title { romaji english } siteUrl coverImage { large } } } }`;
+      const res = await axios.post('https://graphql.anilist.co', { query });
+      const anuncios = res.data?.data?.Page?.media || [];
+      let posted = 0;
+      if (!CONFIG.canalNoticias) return interaction.followUp('⚠️ Canal de noticias no configurado. Usa /setup.');
+      const canal = await client.channels.fetch(CONFIG.canalNoticias).catch(()=>null);
+      if (!canal) return interaction.followUp('❌ No encontré el canal configurado.');
+      for (const a of anuncios) {
+        const idNot = `anilist_${a.title?.romaji || a.title?.english}`;
+        if (CONFIG.ultimasNoticias.includes(idNot)) continue;
+        const embed = new EmbedBuilder()
+          .setTitle('🎊 Nuevo anuncio')
+          .setDescription(`**${a.title?.romaji || a.title?.english}**`)
+          .setURL(a.siteUrl || '')
+          .setImage(a.coverImage?.large || null)
+          .setColor(0x00FF00);
+        await canal.send({ content: CONFIG.rolMencion ? `<@&${CONFIG.rolMencion}>` : '', embeds: [embed] }).catch(console.error);
+        CONFIG.ultimasNoticias.push(idNot);
+        posted++;
+      }
+      // mantener últimas 100
+      CONFIG.ultimasNoticias = CONFIG.ultimasNoticias.slice(-100);
+      saveConfig();
+      await interaction.followUp(`✅ Verificación completada. Nuevos anuncios publicados: ${posted}`);
+    } catch (err) {
+      console.error('Error forzar_verificacion:', err?.response?.data || err.message || err);
+      await interaction.followUp('⚠️ Ocurrió un error al verificar.');
+    }
+  }
+});
+
+// /roshidere (info rápida anime)
+commands.push({
+  data: new SlashCommandBuilder().setName('roshidere').setDescription('Info rápida: When Will Her Tears Dry (Roshidere)'),
+  async execute(interaction) {
+    await interaction.deferReply();
+    try {
+      const res = await axios.get(`https://api.jikan.moe/v4/manga?q=When Will Her Tears Dry&limit=1`);
+      const item = res.data.data?.[0];
+      if (!item) return interaction.editReply('No encontré info de Roshidere.');
+      const embed = new EmbedBuilder()
+        .setTitle(item.title)
+        .setURL(item.url || '')
+        .addFields(
+          { name: 'Estado', value: item.status || 'Desconocido', inline: true },
+          { name: 'Capítulos', value: item.chapters ? String(item.chapters) : 'Desconocido', inline: true }
+        )
+        .setThumbnail(item.images?.jpg?.image_url || '');
+      await interaction.editReply({ embeds: [embed] });
+    } catch (err) {
+      console.error('Error /roshidere:', err);
+      await interaction.editReply('⚠️ Error obteniendo info de Roshidere.');
+    }
+  }
+});
+
+// /cien_novias
+commands.push({
+  data: new SlashCommandBuilder().setName('cien_novias').setDescription('Info rápida: The 100 Girlfriends...'),
+  async execute(interaction) {
+    await interaction.deferReply();
+    try {
+      const mangaRes = await axios.get(`https://api.jikan.moe/v4/manga?q=The 100 Girlfriends&limit=1`);
+      const animeRes = await axios.get(`https://api.jikan.moe/v4/anime?q=The 100 Girlfriends&limit=1`);
+      const manga = mangaRes.data.data?.[0];
+      const anime = animeRes.data.data?.[0];
+      const embed = new EmbedBuilder().setTitle('💕 The 100 Girlfriends Info').setColor(0xFF6B6B);
+      if (manga) embed.addFields({ name: '📖 Manga', value: `Capítulos: ${manga.chapters || '?'}\nEstado: ${manga.status || '?'}`, inline: true });
+      if (anime) embed.addFields({ name: '🎬 Anime', value: `Episodios: ${anime.episodes || '?'}\nEstado: ${anime.status || '?'}`, inline: true });
+      if (manga?.images?.jpg?.image_url) embed.setThumbnail(manga.images.jpg.image_url);
+      await interaction.editReply({ embeds: [embed] });
+    } catch (err) {
+      console.error('Error /cien_novias:', err);
+      await interaction.editReply('⚠️ Error buscando info de 100 Girlfriends.');
+    }
+  }
+});
+
+// register commands array in client.commands and for REST registration later
+for (const c of commands) {
+  client.commands.set(c.data.name, c);
 }
 
-client.login(token).catch(error => {
-    console.error('❌ Error al conectar:', error);
-    process.exit(1);
+// ---------- Register slash commands to GUILD on startup ----------
+const rest = new REST({ version: '10' }).setToken(TOKEN);
+(async () => {
+  try {
+    console.log('🔁 Registrando comandos en el guild...');
+    const cmds = commands.map(c => c.data.toJSON());
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: cmds });
+    console.log(`✅ Comandos registrados (${cmds.length}) en guild ${GUILD_ID}`);
+  } catch (err) {
+    console.error('Error registrando comandos:', err);
+  }
+})();
+
+// ---------- Interaction handler ----------
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isChatInputCommand()) return;
+  const command = client.commands.get(interaction.commandName);
+  if (!command) return interaction.reply({ content: 'Comando no encontrado.', ephemeral: true });
+  try { await command.execute(interaction); } catch (err) { console.error('Error ejecutando comando:', err); try { if (!interaction.replied) await interaction.reply({ content: 'Error interno del comando', ephemeral: true }); } catch (e) {} }
 });
+
+// ---------- startup ----------
+client.once('ready', () => {
+  console.log(`🤖 Conectado como ${client.user.tag} • versión ${BOT_VERSION}`);
+  client.user.setActivity('noticias de anime 🎬', { type: 3 }); // Watching
+});
+
+// graceful save on exit
+process.on('SIGINT', () => { console.log('SIGINT, guardando config...'); saveConfig(); process.exit(); });
+process.on('SIGTERM', () => { console.log('SIGTERM, guardando config...'); saveConfig(); process.exit(); });
+
+client.login(TOKEN).catch(err => { console.error('Fallo al loguear:', err); process.exit(1); });
