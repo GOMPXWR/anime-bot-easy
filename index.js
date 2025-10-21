@@ -11,17 +11,9 @@ import axios from 'axios';
 
 const BOT_VERSION = '2.3.0';
 
-// Debug: Ver qué variables están disponibles
-console.log('🔍 Variables de entorno disponibles:');
-console.log('TOKEN existe:', !!process.env.TOKEN);
-console.log('CLIENT_ID existe:', !!process.env.CLIENT_ID);
-console.log('Todas las variables:', Object.keys(process.env));
-
 // Verificación básica de entorno
 if (!process.env.TOKEN || !process.env.CLIENT_ID) {
   console.error('❌ Faltan variables de entorno. Necesitas TOKEN y CLIENT_ID.');
-  console.error('TOKEN:', process.env.TOKEN ? 'Configurado' : 'FALTA');
-  console.error('CLIENT_ID:', process.env.CLIENT_ID ? 'Configurado' : 'FALTA');
   process.exit(1);
 }
 
@@ -134,14 +126,25 @@ client.on('interactionCreate', async interaction => {
       const item = data.data[0];
       if (!item) return interaction.editReply(`❌ No encontré resultados para **${nombre}** (${tipo}).`);
 
+      // Traducir estado
+      const estadoTraducido = {
+        'Finished Airing': 'Finalizado',
+        'Currently Airing': 'En emisión',
+        'Not yet aired': 'Próximamente',
+        'Finished': 'Finalizado',
+        'Publishing': 'En publicación',
+        'On Hiatus': 'En pausa',
+        'Discontinued': 'Discontinuado'
+      }[item.status] || item.status || 'Desconocido';
+
       const embed = new EmbedBuilder()
         .setTitle(item.title)
         .setDescription(item.synopsis ? item.synopsis.substring(0, 400) + '…' : 'Sin descripción.')
-        .setThumbnail(item.images?.jpg?.image_url)
+        .setImage(item.images?.jpg?.large_image_url || item.images?.jpg?.image_url)
         .addFields(
           { name: '📺 Tipo', value: item.type || 'Desconocido', inline: true },
           { name: '⭐ Puntuación', value: item.score ? `${item.score}/10` : 'N/A', inline: true },
-          { name: '🗓️ Estado', value: item.status || 'Desconocido', inline: true }
+          { name: '🗓️ Estado', value: estadoTraducido, inline: true }
         )
         .setColor(0xf47fff)
         .setFooter({ text: `Fuente: MyAnimeList (${tipo})` });
@@ -170,7 +173,7 @@ client.on('interactionCreate', async interaction => {
       const embed = new EmbedBuilder()
         .setTitle(`🎯 Recomendación (${genero})`)
         .setDescription(random.synopsis?.substring(0, 400) + '…')
-        .setThumbnail(random.images?.jpg?.image_url)
+        .setImage(random.images?.jpg?.large_image_url || random.images?.jpg?.image_url)
         .setURL(random.url)
         .setColor(0x00cc99);
       await interaction.editReply({ embeds: [embed] });
